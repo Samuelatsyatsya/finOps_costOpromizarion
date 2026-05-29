@@ -19,8 +19,8 @@
 set -euo pipefail
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-REGION="us-east-1"
-AZ="us-east-1a"
+REGION="eu-central-1"
+AZ="eu-central-1a"
 export AWS_PROFILE="${AWS_PROFILE:-cost-detective}"
 
 echo "============================================="
