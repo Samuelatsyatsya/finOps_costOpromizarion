@@ -15,7 +15,7 @@ set -euo pipefail
 IAM_USER="CostDetective"
 POLICY_NAME="CostDetectivePolicy"
 PROFILE_NAME="cost-detective"
-REGION="us-east-1"
+REGION="eu-central-1"
 POLICY_FILE="$(dirname "$0")/cost_detective_policy.json"
 
 echo "============================================="
