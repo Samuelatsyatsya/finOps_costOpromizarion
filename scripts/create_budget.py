@@ -109,7 +109,7 @@ def main():
     parser.add_argument("--email", required=True, help="Email address for alerts")
     parser.add_argument("--limit", type=float, default=50.0, help="Monthly budget limit in USD (default: 50)")
     parser.add_argument("--budget-name", default="CostDetective-Monthly-Budget")
-    parser.add_argument("--region", default="us-east-1", help="Region for SNS topic (Budgets is global)")
+    parser.add_argument("--region", default="eu-central-1", help="Region for SNS topic (Budgets is global)")
     args = parser.parse_args()
 
     # ── AWS client setup ──────────────────────────────────────────────────────
