@@ -1,0 +1,15 @@
+{
+  "ConfigRuleName": "require-costcenter-tag-on-ec2",
+  "Description": "Checks that all EC2 instances and EBS volumes have a CostCenter tag.",
+  "Source": {
+    "Owner": "AWS",
+    "SourceIdentifier": "REQUIRED_TAGS"
+  },
+  "Scope": {
+    "ComplianceResourceTypes": [
+      "AWS::EC2::Instance",
+      "AWS::EC2::Volume"
+    ]
+  },
+  "InputParameters": "{\"tag1Key\":\"CostCenter\"}"
+}
