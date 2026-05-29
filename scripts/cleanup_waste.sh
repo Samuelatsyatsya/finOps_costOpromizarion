@@ -21,7 +21,7 @@
 
 set -euo pipefail
 
-REGION="${REGION:-us-east-1}"
+REGION="${REGION:-eu-central-1}"
 export AWS_PROFILE="${AWS_PROFILE:-cost-detective}"
 
 # ── Validate required inputs ───────────────────────────────────────────────────
