@@ -1,0 +1,246 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Cost-Aware Auto Scaling Group using a Mixed Instances Policy.
+  Maintains a base of On-Demand instances and scales out with Spot Instances
+  to minimize cost for stateless workloads.
+
+# ── Parameters ────────────────────────────────────────────────────────────────
+# All deployment-specific values are externalised here so the template can be
+# reused across environments without editing the resource definitions below.
+Parameters:
+
+  # The VPC where all resources (security group, ASG, instances) will be created
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC to deploy the ASG into
+
+  # Provide at least two subnets in different AZs.
+  # Multiple AZs are required for Spot diversification — if one AZ's Spot pool
+  # is interrupted or unavailable, the ASG can launch replacements in another AZ.
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: At least two subnets in different AZs (required for Spot diversity)
+
+  # Resolved automatically from AWS SSM Parameter Store at deploy time.
+  # Using the SSM alias means the stack always gets the latest Amazon Linux 2023 AMI
+  # without needing to hard-code an AMI ID per region.
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Amazon Linux 2023 latest AMI (auto-resolved via SSM)
+
+  # The number of On-Demand instances the ASG will always keep running regardless of load.
+  # These provide a guaranteed, interruption-free baseline capacity.
+  OnDemandBaseCapacity:
+    Type: Number
+    Default: 1
+    Description: Number of On-Demand instances to always keep running
+
+  # ASG size boundaries — the group will never shrink below MinSize or grow above MaxSize
+  MinSize:
+    Type: Number
+    Default: 1
+
+  MaxSize:
+    Type: Number
+    Default: 6
+
+  # The number of instances the ASG targets when first created or when no scaling activity is occurring
+  DesiredCapacity:
+    Type: Number
+    Default: 2
+
+# ── Resources ─────────────────────────────────────────────────────────────────
+Resources:
+
+  # ── Security Group ───────────────────────────────────────────────────────────
+  # Allows inbound HTTP (port 80) from anywhere so the demo web page served by
+  # each instance's UserData script is reachable for verification.
+  # In production, restrict CidrIp to your load balancer's security group instead.
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP inbound for demo workload
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0   # Open to the internet — demo only, tighten for production
+      Tags:
+        - Key: CostCenter
+          Value: cost-detective-demo
+
+  # ── IAM Role ─────────────────────────────────────────────────────────────────
+  # Grants instances the AmazonSSMManagedInstanceCore policy so they can be
+  # accessed via AWS Systems Manager Session Manager without opening SSH (port 22).
+  # This is the recommended approach for secure, auditable shell access.
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com   # Only EC2 instances can assume this role
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore  # Enables SSM Session Manager
+      Tags:
+        - Key: CostCenter
+          Value: cost-detective-demo
+
+  # ── Instance Profile ──────────────────────────────────────────────────────────
+  # Wraps the IAM Role so it can be attached to EC2 instances.
+  # EC2 requires an Instance Profile (not a Role directly) in the launch template.
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+  # ── Launch Template ───────────────────────────────────────────────────────────
+  # Defines the common configuration shared by every instance the ASG launches,
+  # regardless of whether it is On-Demand or Spot.
+  # Note: no InstanceType is set here — instance types are declared in the
+  # MixedInstancesPolicy Overrides list below, which enables Spot diversification.
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: cost-detective-lt
+      LaunchTemplateData:
+        ImageId: !Ref AmiId
+        SecurityGroupIds:
+          - !Ref InstanceSecurityGroup
+        IamInstanceProfile:
+          Arn: !GetAtt InstanceProfile.Arn
+
+        # ── UserData bootstrap script ───────────────────────────────────────
+        # Runs once on first boot (as root).
+        # 1. Installs and starts Apache httpd to serve a simple web page.
+        # 2. Fetches the instance ID and lifecycle (on-demand / spot) from IMDSv2.
+        # 3. Writes a one-line HTML page so you can curl the instance and confirm
+        #    whether it is running as Spot or On-Demand — useful for the walkthrough demo.
+        UserData:
+          Fn::Base64: |
+            #!/bin/bash
+            # Install and start the Apache web server
+            yum install -y httpd
+            systemctl enable --now httpd
+
+            # Retrieve a short-lived IMDSv2 token (required; IMDSv1 is disabled by default on AL2023)
+            TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+
+            # Fetch instance metadata using the token
+            INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+            LIFECYCLE=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-life-cycle)
+
+            # Write the instance ID and lifecycle type to the default web root
+            # curl http://<public-ip> will return: "Hello from i-0abc123 (spot)"
+            echo "<h1>Hello from $INSTANCE_ID ($LIFECYCLE)</h1>" > /var/www/html/index.html
+
+        # ── Tag propagation ─────────────────────────────────────────────────
+        # Tags are applied to both the EC2 instance and its root EBS volume at launch.
+        # This ensures every resource created by the ASG is immediately cost-attributable
+        # and compliant with the CostCenter tagging policy enforced by the Config rule / SCP.
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: CostCenter
+                Value: cost-detective-demo
+              - Key: Name
+                Value: cost-detective-asg-instance
+          - ResourceType: volume
+            Tags:
+              - Key: CostCenter
+                Value: cost-detective-demo
+
+  # ── Auto Scaling Group ────────────────────────────────────────────────────────
+  # The core resource. Uses a MixedInstancesPolicy to blend On-Demand and Spot
+  # instances, achieving significant cost savings on the scale-out portion.
+  CostAwareASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: cost-detective-asg
+      VPCZoneIdentifier: !Ref SubnetIds   # Spread instances across all provided subnets/AZs
+      MinSize: !Ref MinSize
+      MaxSize: !Ref MaxSize
+      DesiredCapacity: !Ref DesiredCapacity
+      HealthCheckType: EC2                # Replace instances that fail EC2 status checks
+      HealthCheckGracePeriod: 60          # Wait 60s after launch before checking health
+
+      # ── Mixed Instances Policy ──────────────────────────────────────────────
+      MixedInstancesPolicy:
+
+        # ── Instances Distribution ────────────────────────────────────────────
+        # Controls the On-Demand / Spot split:
+        #   - OnDemandBaseCapacity: always keep this many On-Demand instances running
+        #   - OnDemandPercentageAboveBaseCapacity: of instances beyond the base,
+        #     25% are On-Demand and 75% are Spot
+        #   - price-capacity-optimized: AWS selects the Spot pool with the lowest
+        #     interruption probability at a competitive price (recommended strategy)
+        InstancesDistribution:
+          OnDemandBaseCapacity: !Ref OnDemandBaseCapacity
+          OnDemandPercentageAboveBaseCapacity: 25   # 25% On-Demand / 75% Spot above the base
+          SpotAllocationStrategy: price-capacity-optimized
+
+        # ── Launch Template + Instance Type Overrides ─────────────────────────
+        # The LaunchTemplate provides the base config (AMI, SG, IAM profile, UserData).
+        # Overrides list multiple instance types so the ASG can pick from several
+        # Spot pools — if one pool is unavailable or interrupted, it falls back to another.
+        # Mixing t3, t3a, and t2 families across small/medium sizes maximises Spot availability.
+        LaunchTemplate:
+          LaunchTemplateSpecification:
+            LaunchTemplateId: !Ref LaunchTemplate
+            Version: !GetAtt LaunchTemplate.LatestVersionNumber  # Always use the latest version
+          Overrides:
+            - InstanceType: t3.small    # Intel, current gen, burstable
+            - InstanceType: t3a.small   # AMD, current gen, burstable — typically cheaper than t3
+            - InstanceType: t2.small    # Intel, previous gen — wider Spot pool availability
+            - InstanceType: t3.medium   # Larger fallback if small pools are exhausted
+            - InstanceType: t3a.medium  # AMD medium — additional fallback option
+
+      # CostCenter tag is propagated to every instance launched by this ASG
+      Tags:
+        - Key: CostCenter
+          Value: cost-detective-demo
+          PropagateAtLaunch: true
+
+  # ── Target Tracking Scaling Policy ───────────────────────────────────────────
+  # Automatically adjusts the ASG's DesiredCapacity to keep average CPU at 60%.
+  # When load increases above 60%, the ASG adds instances (preferring Spot for cost savings).
+  # When load drops, it removes instances down to MinSize.
+  # TargetTrackingScaling is preferred over step scaling because AWS manages the
+  # scale-in/scale-out math automatically.
+  ScaleOutPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref CostAwareASG
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization  # Built-in CloudWatch metric
+        TargetValue: 60.0   # Target 60% average CPU across all instances in the group
+
+# ── Outputs ───────────────────────────────────────────────────────────────────
+# Values printed to the CloudFormation console after a successful deploy.
+# Use these to quickly find the ASG and Launch Template for verification commands.
+Outputs:
+
+  # The ASG name — use this in describe-auto-scaling-instances to check On-Demand vs Spot mix
+  ASGName:
+    Value: !Ref CostAwareASG
+    Description: Auto Scaling Group name
+
+  # The Launch Template ID — useful for inspecting or updating the instance configuration
+  LaunchTemplateId:
+    Value: !Ref LaunchTemplate
+    Description: Launch Template ID
+
+  # Human-readable summary of the cost split for the walkthrough / documentation
+  CostBreakdownNote:
+    Value: !Sub >
+      Base: ${OnDemandBaseCapacity} On-Demand instance(s) always running.
+      Scale-out: 25% On-Demand + 75% Spot (price-capacity-optimized).
+      Spot savings vs On-Demand: typically 60-90%.
