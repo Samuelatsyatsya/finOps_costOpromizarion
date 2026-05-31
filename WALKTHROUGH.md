@@ -23,102 +23,106 @@ Creates a least-privilege IAM user (`CostDetective`) and configures a named AWS 
 
 ### Files
 
-- `scripts/iam/cost_detective_policy.json` — IAM policy with all required permissions
+- `scripts/iam/cost_detective_policy.json` — consolidated IAM policy (v5) covering all audit actions
 - `scripts/iam/setup_iam_user.sh` — creates the user, attaches the policy, generates keys, writes the CLI profile
 
 ### IAM Policy (`scripts/iam/cost_detective_policy.json`)
+
+The final consolidated policy (v5). All permissions are in one managed policy — no inline patches needed in a fresh setup.
 
 ```json
 {
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "EC2ZombieDetectionAndCleanup",
+      "Sid": "EC2",
       "Effect": "Allow",
       "Action": [
-        "ec2:DescribeVolumes", "ec2:DescribeAddresses", "ec2:DescribeInstances",
-        "ec2:DescribeVpcs", "ec2:DescribeSubnets", "ec2:DescribeSecurityGroups",
+        "ec2:Describe*",
         "ec2:CreateVolume", "ec2:DeleteVolume", "ec2:AllocateAddress", "ec2:ReleaseAddress",
-        "ec2:RunInstances", "ec2:TerminateInstances", "ec2:CreateSecurityGroup",
-        "ec2:AuthorizeSecurityGroupIngress", "ec2:CreateTags", "ec2:StopInstances",
-        "ec2:DetachVolume", "ec2:DescribeLaunchTemplates",
-        "ec2:DescribeLaunchTemplateVersions", "ec2:CreateLaunchTemplate"
+        "ec2:RunInstances", "ec2:TerminateInstances", "ec2:StopInstances", "ec2:DetachVolume",
+        "ec2:CreateSecurityGroup", "ec2:DeleteSecurityGroup",
+        "ec2:AuthorizeSecurityGroupIngress", "ec2:RevokeSecurityGroupIngress",
+        "ec2:CreateLaunchTemplate", "ec2:DeleteLaunchTemplate", "ec2:CreateTags",
+        "ec2:CreateVpc", "ec2:DeleteVpc", "ec2:ModifyVpcAttribute",
+        "ec2:CreateSubnet", "ec2:DeleteSubnet", "ec2:ModifySubnetAttribute",
+        "ec2:CreateInternetGateway", "ec2:DeleteInternetGateway",
+        "ec2:AttachInternetGateway", "ec2:DetachInternetGateway",
+        "ec2:CreateRouteTable", "ec2:DeleteRouteTable",
+        "ec2:CreateRoute", "ec2:DeleteRoute",
+        "ec2:AssociateRouteTable", "ec2:DisassociateRouteTable"
       ],
       "Resource": "*"
     },
     {
       "Sid": "BudgetsAndAlerts",
       "Effect": "Allow",
-      "Action": ["budgets:CreateBudget", "budgets:DescribeBudgets", "budgets:ViewBudget"],
-      "Resource": "*"
-    },
-    {
-      "Sid": "SNSForBudgetAlerts",
-      "Effect": "Allow",
-      "Action": ["sns:CreateTopic", "sns:Subscribe", "sns:ListTopics",
-                 "sns:GetTopicAttributes", "sns:SetTopicAttributes"],
-      "Resource": "*"
-    },
-    {
-      "Sid": "ConfigForTaggingRule",
-      "Effect": "Allow",
       "Action": [
-        "config:PutConfigRule", "config:DescribeConfigRules",
-        "config:GetComplianceDetailsByConfigRule",
-        "config:DescribeConfigurationRecorders", "config:DescribeDeliveryChannels"
+        "budgets:CreateBudget", "budgets:ModifyBudget", "budgets:DescribeBudgets", "budgets:ViewBudget",
+        "sns:CreateTopic", "sns:Subscribe", "sns:ListTopics", "sns:GetTopicAttributes", "sns:SetTopicAttributes"
       ],
       "Resource": "*"
     },
     {
-      "Sid": "CloudFormationForASGStack",
+      "Sid": "CostExplorerAndTrustedAdvisor",
       "Effect": "Allow",
       "Action": [
-        "cloudformation:CreateStack", "cloudformation:UpdateStack",
-        "cloudformation:DeleteStack", "cloudformation:DescribeStacks",
-        "cloudformation:DescribeStackEvents", "cloudformation:GetTemplate"
+        "ce:*", "aws-portal:ViewBilling",
+        "trustedadvisor:Describe*",
+        "support:DescribeTrustedAdvisorChecks", "support:DescribeTrustedAdvisorCheckResult"
       ],
       "Resource": "*"
     },
     {
-      "Sid": "AutoScalingForMixedInstancesASG",
+      "Sid": "Config",
       "Effect": "Allow",
       "Action": [
-        "autoscaling:CreateAutoScalingGroup", "autoscaling:UpdateAutoScalingGroup",
-        "autoscaling:DeleteAutoScalingGroup", "autoscaling:DescribeAutoScalingGroups",
-        "autoscaling:DescribeAutoScalingInstances",
-        "autoscaling:PutScalingPolicy", "autoscaling:DeletePolicy"
+        "config:PutConfigRule", "config:Describe*", "config:List*", "config:Get*",
+        "config:PutConfigurationRecorder", "config:StartConfigurationRecorder",
+        "config:PutDeliveryChannel", "config:BatchGetResourceConfig"
       ],
       "Resource": "*"
     },
     {
-      "Sid": "IAMForInstanceProfile",
+      "Sid": "CloudFormation",
+      "Effect": "Allow",
+      "Action": ["cloudformation:*"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "AutoScaling",
+      "Effect": "Allow",
+      "Action": ["autoscaling:*"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "IAM",
       "Effect": "Allow",
       "Action": [
         "iam:CreateRole", "iam:DeleteRole", "iam:AttachRolePolicy", "iam:DetachRolePolicy",
+        "iam:TagRole", "iam:UntagRole",
         "iam:CreateInstanceProfile", "iam:DeleteInstanceProfile",
         "iam:AddRoleToInstanceProfile", "iam:RemoveRoleFromInstanceProfile",
-        "iam:GetRole", "iam:GetInstanceProfile", "iam:PassRole"
+        "iam:GetRole", "iam:GetInstanceProfile", "iam:PassRole",
+        "iam:ListRoles", "iam:CreateServiceLinkedRole"
       ],
       "Resource": "*"
     },
     {
-      "Sid": "SSMForAMIResolution",
+      "Sid": "S3ForConfig",
+      "Effect": "Allow",
+      "Action": ["s3:CreateBucket", "s3:PutBucketPolicy", "s3:GetBucketAcl", "s3:PutObject", "s3:ListBucket"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SSM",
       "Effect": "Allow",
       "Action": ["ssm:GetParameter", "ssm:GetParameters"],
-      "Resource": "arn:aws:ssm:*::parameter/aws/service/ami-amazon-linux-latest/*"
+      "Resource": "*"
     }
   ]
 }
 ```
-
-> **Note:** The following inline policies were added later via admin credentials to patch permissions discovered during execution. In a fresh setup, include these in the base policy above to avoid incremental patching.
-
-| Inline Policy Name | Additional Actions Granted |
-|---|---|
-| `CostDetective-StopDetach-Patch` | `ec2:StopInstances`, `ec2:DetachVolume` |
-| `CostDetective-CostExplorer` | `ce:*`, billing read, Trusted Advisor read |
-| `CostDetective-BudgetsPatch` | `budgets:ModifyBudget`, `budgets:CreateBudget` |
-| `CostDetective-ConfigReadOnly` | `config:Describe*`, `config:List*`, `config:Get*`, `iam:ListRoles`, `iam:GetRole` |
 
 ### Steps to Reproduce
 
@@ -141,7 +145,7 @@ Expected output:
 
 > **Screenshot placeholder — IAM user setup**
 > ![IAM user created](./screenshots/00_iam_user_created.png)
-> *AWS Console → IAM → Users → CostDetective showing the user and attached policies*
+> *AWS Console → IAM → Users → CostDetective showing the user and attached CostDetectivePolicy*
 
 ---
 
@@ -159,11 +163,15 @@ Expected output:
 
 ### Step 1a — Simulate Zombie Resources
 
-The script creates three waste resources to audit against:
+The script creates three types of waste resources to audit against:
 
 1. **Unassociated Elastic IP** — allocated but never attached to an instance
 2. **Oversized idle EC2 instance** — `m5.xlarge` with no workload
-3. **Detached EBS volume** — root volume detached from a stopped `t2.micro` (DCE accounts block `ec2:CreateVolume` directly via SCP, so this workaround is used)
+3. **Detached EBS volume** — root volume detached from a stopped `t2.micro`
+
+> **Note:** DCE sandbox accounts block `ec2:CreateVolume` directly via SCP, so EBS waste is
+> simulated by launching a `t2.micro`, stopping it, and detaching its root volume — leaving it
+> in `available` (unattached) state.
 
 **File:** `scripts/simulate_waste.sh`
 
@@ -250,13 +258,13 @@ Key checks:
 
 **File:** `scripts/garbage_collect_ebs.py`
 
-The script uses a paginator to scan all EBS volumes with `status = available` across the region, prints a summary table, and optionally deletes them.
+Scans all EBS volumes with `status = available` using a paginator, prints a summary table, and optionally deletes them.
 
 ```bash
-# Step 1: Dry-run — list all unattached volumes, delete nothing
+# Dry-run — list all unattached volumes, delete nothing
 python3 scripts/garbage_collect_ebs.py
 
-# Step 2: Delete after confirming the list
+# Delete after confirming the list
 python3 scripts/garbage_collect_ebs.py --delete
 ```
 
@@ -292,7 +300,7 @@ Done. Deleted: 1 | Failed: 0 | Freed: ~8 GB
 
 **File:** `scripts/garbage_collect_eips.py`
 
-Finds all VPC Elastic IPs that have no `AssociationId` (not attached to any instance or ENI).
+Finds all VPC Elastic IPs with no `AssociationId` (not attached to any instance or ENI).
 
 ```bash
 # Dry-run first
@@ -329,7 +337,7 @@ Done. Released: 1 | Failed: 0 | Saved: ~$3.65/month
 
 ### Step 1f — Full Cleanup (Post-Demo Teardown)
 
-After screenshots are captured, tear everything down in one command:
+After screenshots are captured, tear everything down with one script.
 
 **File:** `scripts/cleanup_waste.sh`
 
@@ -367,6 +375,14 @@ Sample output:
 =============================================
 ```
 
+> **Note:** If the EIP and volume have already been cleaned up (e.g. by the garbage collector scripts)
+> and only instances remain, terminate them directly:
+> ```bash
+> aws ec2 terminate-instances \
+>   --instance-ids <IDLE_INSTANCE_ID> <EBS_INSTANCE_ID> \
+>   --profile cost-detective --region eu-central-1
+> ```
+
 > **Screenshot placeholder — Post-cleanup verification**
 > ![Empty Volumes](./screenshots/01i_volumes_empty_after_cleanup.png)
 > *AWS Console → EC2 → Volumes showing no volumes in "available" state*
@@ -383,8 +399,8 @@ Creates a monthly cost budget with two alert thresholds routed through an SNS to
 
 | Alert | Type | Threshold |
 |---|---|---|
-| Alert 1 | Forecasted | >100% of limit (e.g. forecast will exceed $50) |
-| Alert 2 | Actual | >80% of limit (e.g. actual spend has hit $40) |
+| Alert 1 | Forecasted | >100% of limit (forecast will exceed $50) |
+| Alert 2 | Actual | >80% of limit (actual spend has hit $40) |
 
 ```bash
 python3 scripts/create_budget.py \
@@ -426,7 +442,7 @@ A tagging policy ensures every resource is attributable to a team or project —
 
 **File:** `scripts/tagging_policy/scp_require_costcenter.json`
 
-Blocks `ec2:RunInstances` and `ec2:CreateVolume` if the `CostCenter` tag is missing. Applied at the AWS Organizations OU level.
+Blocks `ec2:RunInstances` and `ec2:CreateVolume` if the `CostCenter` tag is missing. Applied at the AWS Organizations OU level — stops non-compliant resources from being created in the first place.
 
 ```json
 {
@@ -474,11 +490,11 @@ aws organizations attach-policy \
 
 **File:** `scripts/tagging_policy/deploy_config_rule.py`
 
-Flags existing non-compliant resources without blocking them. The script handles the full AWS Config setup:
+Flags existing non-compliant resources without blocking them. Good for brownfield environments. The script handles the full AWS Config setup:
 
 1. Creates the S3 bucket for Config snapshots (`cost-detective-config-<account-id>`)
 2. Creates the `CostDetectiveConfigRole` IAM role for the Config service
-3. Creates a configuration recorder (scoped to `EC2::Instance` and `EC2::Volume` only)
+3. Creates a configuration recorder scoped to `EC2::Instance` and `EC2::Volume`
 4. Creates the delivery channel pointing to the S3 bucket
 5. Starts the recorder
 6. Deploys the `REQUIRED_TAGS` managed rule
@@ -513,12 +529,10 @@ Done. Check AWS Config -> Rules in ~10 minutes for compliance results.
 Verify via CLI immediately after:
 ```bash
 aws configservice describe-config-rules \
-  --profile cost-detective \
-  --region eu-central-1
+  --profile cost-detective --region eu-central-1
 
 aws configservice describe-configuration-recorder-status \
-  --profile cost-detective \
-  --region eu-central-1
+  --profile cost-detective --region eu-central-1
 ```
 
 > **Screenshot placeholder — AWS Config rule deployed**
@@ -543,105 +557,126 @@ Instead of paying full On-Demand price for every instance, the ASG uses a Mixed 
 
 Spot Instances are typically **60–90% cheaper** than On-Demand. With `price-capacity-optimized` strategy, AWS selects the Spot pool least likely to be interrupted.
 
-Five instance types are configured as overrides across two families (`t3`, `t3a`, `t2`) — if one Spot pool is unavailable, the ASG falls back to another.
+Five instance types are configured as overrides across two families (`t3`, `t3a`, `t2`) — if one Spot pool is unavailable or prices spike, the ASG falls back to another.
 
-**File:** `infrastructure/asg_mixed_instances.yaml`
+### Infrastructure Files
 
-### Prerequisites
+| File | Purpose |
+|---|---|
+| `infrastructure/vpc.yaml` | VPC, 2 public subnets (eu-central-1a/b), IGW, route table |
+| `infrastructure/asg_mixed_instances.yaml` | Launch Template, IAM role, Security Group, ASG, Scaling Policy |
+| `scripts/deploy_stacks.sh` | Idempotent deploy — VPC stack first, then ASG stack |
+| `scripts/teardown_stacks.sh` | Safe teardown — ASG first (removes Fn::ImportValue dependency), then VPC; auto-retries on DELETE_FAILED |
 
-Get your VPC and subnet IDs:
+The two stacks are linked via **CloudFormation Exports**: `vpc.yaml` exports `VpcId` and `SubnetIds`, and `asg_mixed_instances.yaml` reads them with `Fn::ImportValue` — no manual copy-pasting of IDs.
 
-```bash
-# List VPCs
-aws ec2 describe-vpcs \
-  --profile cost-detective \
-  --region eu-central-1 \
-  --query "Vpcs[*].[VpcId,CidrBlock,Tags[?Key=='Name'].Value|[0]]" \
-  --output table
-
-# List subnets in your VPC
-aws ec2 describe-subnets \
-  --profile cost-detective \
-  --region eu-central-1 \
-  --filters "Name=vpc-id,Values=<your-vpc-id>" \
-  --query "Subnets[*].[SubnetId,AvailabilityZone,CidrBlock]" \
-  --output table
-```
-
-### Deploy the Stack
+### Deploy
 
 ```bash
-aws cloudformation deploy \
-  --template-file infrastructure/asg_mixed_instances.yaml \
-  --stack-name cost-detective-asg \
-  --capabilities CAPABILITY_IAM \
-  --region eu-central-1 \
-  --profile cost-detective \
-  --parameter-overrides \
-    VpcId=vpc-xxxxxxxxxxxxxxxxx \
-    SubnetIds="subnet-aaa111,subnet-bbb222" \
-    OnDemandBaseCapacity=1 \
-    MinSize=1 \
-    MaxSize=6 \
-    DesiredCapacity=2
+bash scripts/deploy_stacks.sh
 ```
 
-> **Screenshot placeholder — CloudFormation stack deploy**
-> ![CloudFormation stack creating](./screenshots/03a_cfn_stack_creating.png)
-> *CloudFormation → Stacks → cost-detective-asg showing CREATE_IN_PROGRESS*
+Sample output:
+```
+[1/2] Deploying VPC stack (cost-detective-vpc)...
+Successfully created/updated stack - cost-detective-vpc
 
-> ![CloudFormation stack complete](./screenshots/03b_cfn_stack_complete.png)
+  VPC stack outputs:
++---------------+--------------------------------------------------+
+|  VpcId        |  vpc-077600669d1c8beef                           |
+|  PublicSubnetA|  subnet-09c220c7eedaa0f28                        |
+|  PublicSubnetB|  subnet-0e6db90d629cda4d5                        |
+|  SubnetIds    |  subnet-09c220c7eedaa0f28,subnet-0e6db90d629cda4d5|
++---------------+--------------------------------------------------+
+
+[2/2] Deploying ASG stack (cost-detective-asg)...
+Successfully created/updated stack - cost-detective-asg
+
+  ASG stack outputs:
++-------------------+------------------------------------------------------------+
+|  ASGName          |  cost-detective-asg                                        |
+|  LaunchTemplateId |  lt-061046c33930494c9                                      |
+|  CostBreakdownNote|  Base: 1 On-Demand. Scale-out: 25% On-Demand + 75% Spot.  |
++-------------------+------------------------------------------------------------+
+```
+
+> **Screenshot placeholder — CloudFormation stacks created**
+> ![VPC stack complete](./screenshots/03a_vpc_stack_complete.png)
+> *CloudFormation → Stacks → cost-detective-vpc showing CREATE_COMPLETE*
+
+> ![ASG stack complete](./screenshots/03b_asg_stack_complete.png)
 > *CloudFormation → Stacks → cost-detective-asg showing CREATE_COMPLETE with outputs*
 
 ### Verify the On-Demand / Spot Mix
 
-```bash
-# Check lifecycle of each running instance
-aws autoscaling describe-auto-scaling-instances \
-  --profile cost-detective \
-  --region eu-central-1 \
-  --query "AutoScalingInstances[?AutoScalingGroupName=='cost-detective-asg'].[InstanceId,InstanceType,LifecycleState]" \
-  --output table
+With `DesiredCapacity=2` (default), AWS may launch both as On-Demand. Scale to 4 to force Spot instances — this gives 3 instances above the base, of which 2 (~75%) will be Spot:
 
-# Check instance purchase type (on-demand vs spot)
+```bash
+aws autoscaling update-auto-scaling-group \
+  --auto-scaling-group-name cost-detective-asg \
+  --desired-capacity 4 \
+  --profile cost-detective --region eu-central-1
+
+# Wait ~30s then check lifecycle
 aws ec2 describe-instances \
-  --profile cost-detective \
-  --region eu-central-1 \
+  --profile cost-detective --region eu-central-1 \
   --filters "Name=tag:aws:autoscaling:groupName,Values=cost-detective-asg" \
+            "Name=instance-state-name,Values=running,pending" \
   --query "Reservations[*].Instances[*].[InstanceId,InstanceType,InstanceLifecycle,State.Name]" \
   --output table
 ```
 
-`InstanceLifecycle` will show `spot` for Spot Instances and is absent (defaults to `normal`) for On-Demand.
-
-The UserData script on each instance also serves its purchase type over HTTP:
-
-```bash
-# Replace with an actual instance public IP
-curl http://<instance-public-ip>
-# → <h1>Hello from i-0abc123 (spot)</h1>
-# → <h1>Hello from i-0def456 (on-demand)</h1>
+Actual output observed during this audit:
+```
+--------------------------------------------------------
+|                   DescribeInstances                  |
++----------------------+-----------+-------+-----------+
+|  i-053b66473739bb4be |  t3.small |  None |  running  |   ← On-Demand (25% above base)
+|  i-0159d8e29317727c6 |  t3.small |  None |  running  |   ← On-Demand (base)
+|  i-03b6ec75e46ad009c |  t2.small |  spot |  running  |   ← Spot
+|  i-09e5fee7f1c40b715 |  t2.small |  spot |  running  |   ← Spot
++----------------------+-----------+-------+-----------+
 ```
 
-> **Screenshot placeholder — ASG instances with Spot/On-Demand mix**
-> ![ASG instances table](./screenshots/03c_asg_instances_mix.png)
-> *Terminal output showing InstanceLifecycle: spot and normal side by side*
+`InstanceLifecycle = None` means On-Demand. `spot` means Spot. The ASG also selected `t2.small` for the Spot instances — demonstrating multi-family instance type diversification.
 
-> ![EC2 console ASG instances](./screenshots/03d_ec2_asg_instances_console.png)
-> *AWS Console → EC2 → Instances filtered by ASG, showing instance types and lifecycle*
+Verify the MixedInstancesPolicy distribution is correctly set:
+```bash
+aws autoscaling describe-auto-scaling-groups \
+  --auto-scaling-group-names cost-detective-asg \
+  --profile cost-detective --region eu-central-1 \
+  --query "AutoScalingGroups[0].MixedInstancesPolicy.InstancesDistribution" \
+  --output table
+```
+
+Expected output:
+```
++--------------------------------------+----------------------------+
+|  OnDemandAllocationStrategy          |  prioritized               |
+|  OnDemandBaseCapacity                |  1                         |
+|  OnDemandPercentageAboveBaseCapacity |  25                        |
+|  SpotAllocationStrategy              |  price-capacity-optimized  |
++--------------------------------------+----------------------------+
+```
+
+> **Screenshot placeholder — ASG instance mix**
+> ![ASG Spot vs On-Demand](./screenshots/03c_asg_spot_ondemand_mix.png)
+> *Terminal output showing 2 On-Demand (InstanceLifecycle: None) and 2 Spot instances*
+
+> ![ASG console instance management](./screenshots/03d_asg_console_instances.png)
+> *AWS Console → EC2 → Auto Scaling Groups → cost-detective-asg → Instance management tab*
 
 ### Teardown
 
 ```bash
-aws cloudformation delete-stack \
-  --stack-name cost-detective-asg \
-  --region eu-central-1 \
-  --profile cost-detective
+bash scripts/teardown_stacks.sh
 ```
 
-> **Screenshot placeholder — Stack deleted**
-> ![Stack deleted](./screenshots/03e_cfn_stack_deleted.png)
-> *CloudFormation → Stacks showing cost-detective-asg in DELETE_COMPLETE or absent from the list*
+The script deletes the ASG stack first (removes the `Fn::ImportValue` dependency), then the VPC stack. If any resource fails to delete due to a permission error, it automatically retries with `--retain-resources` and cleans up the orphan manually.
+
+> **Screenshot placeholder — Stacks deleted**
+> ![Stacks deleted](./screenshots/03e_stacks_deleted.png)
+> *CloudFormation → Stacks showing both stacks in DELETE_COMPLETE or absent*
 
 ---
 
@@ -662,10 +697,15 @@ Actual savings depend on region, instance hours, and workload profile.
 ## Key Commands Reference
 
 ```bash
-# Verify CLI profile
+# ── Setup ──────────────────────────────────────────────────────────────────
+# Create IAM user and CLI profile (run with admin credentials)
+bash scripts/iam/setup_iam_user.sh
+
+# Verify the profile works
 aws sts get-caller-identity --profile cost-detective
 
-# Simulate zombie resources
+# ── Part 1 — Zombie Asset Detection & Cleanup ──────────────────────────────
+# Create zombie resources
 bash scripts/simulate_waste.sh
 
 # Scan for zombie EBS volumes (dry-run)
@@ -680,34 +720,42 @@ python3 scripts/garbage_collect_eips.py
 # Release unassociated Elastic IPs
 python3 scripts/garbage_collect_eips.py --release
 
-# Create budget + SNS alert
-python3 scripts/create_budget.py --account-id 309797288544 --email you@example.com --limit 50
-
-# Deploy AWS Config tagging rule
-python3 scripts/tagging_policy/deploy_config_rule.py --profile cost-detective
-
-# Verify Config rule deployed
-aws configservice describe-config-rules --profile cost-detective --region eu-central-1
-
-# Deploy cost-aware ASG
-aws cloudformation deploy \
-  --template-file infrastructure/asg_mixed_instances.yaml \
-  --stack-name cost-detective-asg \
-  --capabilities CAPABILITY_IAM \
-  --region eu-central-1 \
-  --profile cost-detective \
-  --parameter-overrides VpcId=vpc-xxx SubnetIds="subnet-aaa,subnet-bbb"
-
-# Check Spot vs On-Demand mix
-aws autoscaling describe-auto-scaling-instances \
-  --profile cost-detective --region eu-central-1 \
-  --query "AutoScalingInstances[?AutoScalingGroupName=='cost-detective-asg'].[InstanceId,InstanceType,LifecycleState]" \
-  --output table
-
-# Tear down the ASG stack
-aws cloudformation delete-stack --stack-name cost-detective-asg --region eu-central-1 --profile cost-detective
-
-# Tear down zombie resources (post-demo)
+# Tear down all simulation resources
 export ALLOC_ID=eipalloc-xxx IDLE_INSTANCE_ID=i-xxx EBS_INSTANCE_ID=i-xxx VOLUME_ID=vol-xxx
 bash scripts/cleanup_waste.sh
+
+# ── Part 2 — Governance ────────────────────────────────────────────────────
+# Create budget + SNS alert
+python3 scripts/create_budget.py \
+  --account-id 309797288544 \
+  --email you@example.com \
+  --limit 50
+
+# Deploy AWS Config tagging rule (full setup — idempotent)
+python3 scripts/tagging_policy/deploy_config_rule.py --profile cost-detective
+
+# Verify Config rule and recorder status
+aws configservice describe-config-rules --profile cost-detective --region eu-central-1
+aws configservice describe-configuration-recorder-status --profile cost-detective --region eu-central-1
+
+# ── Part 3 — Cost-Aware ASG ────────────────────────────────────────────────
+# Deploy VPC + ASG stacks (idempotent)
+bash scripts/deploy_stacks.sh
+
+# Scale to 4 to trigger Spot instance launches
+aws autoscaling update-auto-scaling-group \
+  --auto-scaling-group-name cost-detective-asg \
+  --desired-capacity 4 \
+  --profile cost-detective --region eu-central-1
+
+# Verify Spot vs On-Demand mix
+aws ec2 describe-instances \
+  --profile cost-detective --region eu-central-1 \
+  --filters "Name=tag:aws:autoscaling:groupName,Values=cost-detective-asg" \
+            "Name=instance-state-name,Values=running,pending" \
+  --query "Reservations[*].Instances[*].[InstanceId,InstanceType,InstanceLifecycle,State.Name]" \
+  --output table
+
+# Tear down both stacks (safe, handles DELETE_FAILED automatically)
+bash scripts/teardown_stacks.sh
 ```
