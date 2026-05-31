@@ -144,7 +144,6 @@ Expected output:
 ```
 
 > **Screenshot placeholder — IAM user setup**
-> ![IAM user created](./screenshots/00_iam_user_created.png)
 > *AWS Console → IAM → Users → CostDetective showing the user and attached CostDetectivePolicy*
 
 ---
@@ -213,15 +212,19 @@ Sample output:
 =============================================
 ```
 
-> **Screenshot placeholder — Zombie resources in the console**
-> ![EC2 Instances](./screenshots/01a_ec2_instances_zombie.png)
+> **Simulation terminal output**
+> ![simulate_waste.sh output](./screenshots/01a_simulate_waste_output.png)
+> *Terminal: simulate_waste.sh creating the EIP, idle m5.xlarge, and detached EBS volume*
+
+> **Zombie resources in the console**
+> ![EC2 Instances](./screenshots/01b_ec2_instances_zombie.png)
 > *AWS Console → EC2 → Instances showing the idle m5.xlarge and stopped t2.micro*
 
-> ![EBS Volumes](./screenshots/01b_ebs_volume_available.png)
+> ![EBS Volumes](./screenshots/01d_ebs_volume_available.png)
 > *AWS Console → EC2 → Volumes showing the detached volume in "available" state*
 
 > ![Elastic IPs](./screenshots/01c_elastic_ip_unassociated.png)
-> *AWS Console → EC2 → Elastic IPs showing the unassociated IP*
+> *AWS Console → EC2 → Elastic IPs showing the unassociated IPs*
 
 ---
 
@@ -236,9 +239,8 @@ Key checks:
 
 > **Note:** Full Trusted Advisor checks require Business or Enterprise Support. Free tier shows a subset.
 
-> **Screenshot placeholder — Trusted Advisor**
-> ![Trusted Advisor Cost Optimization](./screenshots/01d_trusted_advisor_cost.png)
-> *Trusted Advisor → Cost Optimization checks showing flagged resources*
+> ![Trusted Advisor Cost Optimization](./screenshots/01g_trusted_advisor_cost.png)
+> *Trusted Advisor → Cost Optimization checks*
 
 ---
 
@@ -248,9 +250,11 @@ Key checks:
 2. Filter by service: EC2
 3. Look for instances flagged as "Terminate" or "Downsize"
 
-> **Screenshot placeholder — Cost Explorer**
-> ![Cost Explorer Rightsizing](./screenshots/01e_cost_explorer_rightsizing.png)
-> *Cost Explorer → Rightsizing Recommendations showing the idle m5.xlarge*
+> ![Cost Explorer](./screenshots/01e_cost_explorer.png)
+> *Cost Explorer → Cost and usage overview*
+
+> ![Cost Explorer breakdown](./screenshots/01f_cost_explorer_breakdown.png)
+> *Cost Explorer → Service cost breakdown*
 
 ---
 
@@ -287,12 +291,8 @@ Deleting volumes...
 Done. Deleted: 1 | Failed: 0 | Freed: ~8 GB
 ```
 
-> **Screenshot placeholder — EBS garbage collector**
-> ![EBS GC dry-run](./screenshots/01f_ebs_gc_dryrun.png)
-> *Terminal output of the dry-run listing the zombie volume*
-
-> ![EBS GC delete](./screenshots/01g_ebs_gc_delete.png)
-> *Terminal output confirming the volume was deleted*
+> ![EBS GC dry-run](./screenshots/01h_ebs_gc_dryrun.png)
+> *Terminal: dry-run listing the zombie volume (no deletion)*
 
 ---
 
@@ -329,9 +329,8 @@ Releasing EIPs...
 Done. Released: 1 | Failed: 0 | Saved: ~$3.65/month
 ```
 
-> **Screenshot placeholder — EIP garbage collector**
-> ![EIP GC](./screenshots/01h_eip_gc_release.png)
-> *Terminal output confirming the Elastic IP was released*
+> ![EBS GC delete and EIP release](./screenshots/01i_ebs_gc_delete_eip_release.png)
+> *Terminal: garbage_collect_ebs.py --delete and garbage_collect_eips.py --release*
 
 ---
 
@@ -383,9 +382,6 @@ Sample output:
 >   --profile cost-detective --region eu-central-1
 > ```
 
-> **Screenshot placeholder — Post-cleanup verification**
-> ![Empty Volumes](./screenshots/01i_volumes_empty_after_cleanup.png)
-> *AWS Console → EC2 → Volumes showing no volumes in "available" state*
 
 ---
 
@@ -423,12 +419,11 @@ Budget 'CostDetective-Monthly-Budget' created:
 
 > **Important:** Check your inbox for the SNS confirmation email and click **Confirm subscription** — alerts will not be delivered until confirmed.
 
-> **Screenshot placeholder — AWS Budget created**
-> ![Budget in console](./screenshots/02a_budget_created.png)
-> *AWS Console → Billing → Budgets showing the CostDetective-Monthly-Budget*
+> ![Budget creation output](./screenshots/02a_budget_creation_output.png)
+> *Terminal: create_budget.py output showing SNS topic and budget created*
 
-> ![SNS subscription confirmation email](./screenshots/02b_sns_confirmation_email.png)
-> *Email inbox showing the SNS subscription confirmation email*
+> ![Budget in console](./screenshots/02b_budget_console.png)
+> *AWS Console → Billing → Budgets showing CostDetective-Monthly-Budget ($50, Healthy)*
 
 ---
 
@@ -535,12 +530,11 @@ aws configservice describe-configuration-recorder-status \
   --profile cost-detective --region eu-central-1
 ```
 
-> **Screenshot placeholder — AWS Config rule deployed**
-> ![Config Rules list](./screenshots/02c_config_rule_deployed.png)
-> *AWS Console → Config → Rules showing require-costcenter-tag-on-ec2*
+> ![Config rule deploy output](./screenshots/02c_config_rule_deploy_output.png)
+> *Terminal: deploy_config_rule.py setting up S3, IAM role, recorder, delivery channel and rule*
 
-> ![Config compliance status](./screenshots/02d_config_compliance.png)
-> *Config rule detail showing compliance status — non-compliant resources listed under "Resources in scope"*
+> ![Config Rules console](./screenshots/02d_config_rule_console.png)
+> *AWS Console → Config → Rules showing require-costcenter-tag-on-ec2 with compliance status*
 
 ---
 
@@ -600,12 +594,8 @@ Successfully created/updated stack - cost-detective-asg
 +-------------------+------------------------------------------------------------+
 ```
 
-> **Screenshot placeholder — CloudFormation stacks created**
-> ![VPC stack complete](./screenshots/03a_vpc_stack_complete.png)
-> *CloudFormation → Stacks → cost-detective-vpc showing CREATE_COMPLETE*
-
-> ![ASG stack complete](./screenshots/03b_asg_stack_complete.png)
-> *CloudFormation → Stacks → cost-detective-asg showing CREATE_COMPLETE with outputs*
+> ![deploy_stacks.sh output](./screenshots/03a_deploy_stacks_output.png)
+> *Terminal: deploy_stacks.sh — both VPC and ASG stacks deployed with outputs*
 
 ### Verify the On-Demand / Spot Mix
 
@@ -659,12 +649,14 @@ Expected output:
 +--------------------------------------+----------------------------+
 ```
 
-> **Screenshot placeholder — ASG instance mix**
-> ![ASG Spot vs On-Demand](./screenshots/03c_asg_spot_ondemand_mix.png)
-> *Terminal output showing 2 On-Demand (InstanceLifecycle: None) and 2 Spot instances*
+> ![ASG EC2 instances console](./screenshots/03b_asg_ec2_instances_console.png)
+> *AWS Console → EC2 → Instances showing all 4 ASG instances running*
 
-> ![ASG console instance management](./screenshots/03d_asg_console_instances.png)
+> ![ASG instance management tab](./screenshots/03c_asg_instance_management.png)
 > *AWS Console → EC2 → Auto Scaling Groups → cost-detective-asg → Instance management tab*
+
+> ![Spot vs On-Demand mix](./screenshots/03d_asg_spot_ondemand_mix.png)
+> *Terminal: describe-instances output showing 2 Spot (t2.small) and 2 On-Demand (t3.small)*
 
 ### Teardown
 
@@ -674,9 +666,8 @@ bash scripts/teardown_stacks.sh
 
 The script deletes the ASG stack first (removes the `Fn::ImportValue` dependency), then the VPC stack. If any resource fails to delete due to a permission error, it automatically retries with `--retain-resources` and cleans up the orphan manually.
 
-> **Screenshot placeholder — Stacks deleted**
-> ![Stacks deleted](./screenshots/03e_stacks_deleted.png)
-> *CloudFormation → Stacks showing both stacks in DELETE_COMPLETE or absent*
+> ![Teardown output](./screenshots/03e_teardown_stacks_output.png)
+> *Terminal: teardown_stacks.sh deleting both stacks cleanly*
 
 ---
 
