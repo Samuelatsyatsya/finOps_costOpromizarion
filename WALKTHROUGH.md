@@ -1,0 +1,713 @@
+# Cost Detective — AWS FinOps Audit Walkthrough
+
+End-to-end reproduction guide covering all three parts of the audit: zombie asset detection and cleanup, governance (budgets + tagging policy), and cost-aware Auto Scaling with Spot Instances.
+
+**Account:** `309797288544` | **Region:** `eu-central-1` | **CLI Profile:** `cost-detective`
+
+---
+
+## Table of Contents
+
+1. [Setup — IAM User & CLI Profile](#0-setup--iam-user--cli-profile)
+2. [Part 1 — Zombie Asset Detection & Cleanup](#part-1--zombie-asset-detection--cleanup)
+3. [Part 2 — Governance](#part-2--governance)
+4. [Part 3 — Cost-Aware Auto Scaling Group](#part-3--cost-aware-auto-scaling-group)
+
+---
+
+## 0. Setup — IAM User & CLI Profile
+
+### What this does
+
+Creates a least-privilege IAM user (`CostDetective`) and configures a named AWS CLI profile so every script in the project authenticates as that user rather than with root credentials.
+
+### Files
+
+- `scripts/iam/cost_detective_policy.json` — IAM policy with all required permissions
+- `scripts/iam/setup_iam_user.sh` — creates the user, attaches the policy, generates keys, writes the CLI profile
+
+### IAM Policy (`scripts/iam/cost_detective_policy.json`)
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "EC2ZombieDetectionAndCleanup",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeVolumes", "ec2:DescribeAddresses", "ec2:DescribeInstances",
+        "ec2:DescribeVpcs", "ec2:DescribeSubnets", "ec2:DescribeSecurityGroups",
+        "ec2:CreateVolume", "ec2:DeleteVolume", "ec2:AllocateAddress", "ec2:ReleaseAddress",
+        "ec2:RunInstances", "ec2:TerminateInstances", "ec2:CreateSecurityGroup",
+        "ec2:AuthorizeSecurityGroupIngress", "ec2:CreateTags", "ec2:StopInstances",
+        "ec2:DetachVolume", "ec2:DescribeLaunchTemplates",
+        "ec2:DescribeLaunchTemplateVersions", "ec2:CreateLaunchTemplate"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "BudgetsAndAlerts",
+      "Effect": "Allow",
+      "Action": ["budgets:CreateBudget", "budgets:DescribeBudgets", "budgets:ViewBudget"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SNSForBudgetAlerts",
+      "Effect": "Allow",
+      "Action": ["sns:CreateTopic", "sns:Subscribe", "sns:ListTopics",
+                 "sns:GetTopicAttributes", "sns:SetTopicAttributes"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ConfigForTaggingRule",
+      "Effect": "Allow",
+      "Action": [
+        "config:PutConfigRule", "config:DescribeConfigRules",
+        "config:GetComplianceDetailsByConfigRule",
+        "config:DescribeConfigurationRecorders", "config:DescribeDeliveryChannels"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "CloudFormationForASGStack",
+      "Effect": "Allow",
+      "Action": [
+        "cloudformation:CreateStack", "cloudformation:UpdateStack",
+        "cloudformation:DeleteStack", "cloudformation:DescribeStacks",
+        "cloudformation:DescribeStackEvents", "cloudformation:GetTemplate"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "AutoScalingForMixedInstancesASG",
+      "Effect": "Allow",
+      "Action": [
+        "autoscaling:CreateAutoScalingGroup", "autoscaling:UpdateAutoScalingGroup",
+        "autoscaling:DeleteAutoScalingGroup", "autoscaling:DescribeAutoScalingGroups",
+        "autoscaling:DescribeAutoScalingInstances",
+        "autoscaling:PutScalingPolicy", "autoscaling:DeletePolicy"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "IAMForInstanceProfile",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole", "iam:DeleteRole", "iam:AttachRolePolicy", "iam:DetachRolePolicy",
+        "iam:CreateInstanceProfile", "iam:DeleteInstanceProfile",
+        "iam:AddRoleToInstanceProfile", "iam:RemoveRoleFromInstanceProfile",
+        "iam:GetRole", "iam:GetInstanceProfile", "iam:PassRole"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SSMForAMIResolution",
+      "Effect": "Allow",
+      "Action": ["ssm:GetParameter", "ssm:GetParameters"],
+      "Resource": "arn:aws:ssm:*::parameter/aws/service/ami-amazon-linux-latest/*"
+    }
+  ]
+}
+```
+
+> **Note:** The following inline policies were added later via admin credentials to patch permissions discovered during execution. In a fresh setup, include these in the base policy above to avoid incremental patching.
+
+| Inline Policy Name | Additional Actions Granted |
+|---|---|
+| `CostDetective-StopDetach-Patch` | `ec2:StopInstances`, `ec2:DetachVolume` |
+| `CostDetective-CostExplorer` | `ce:*`, billing read, Trusted Advisor read |
+| `CostDetective-BudgetsPatch` | `budgets:ModifyBudget`, `budgets:CreateBudget` |
+| `CostDetective-ConfigReadOnly` | `config:Describe*`, `config:List*`, `config:Get*`, `iam:ListRoles`, `iam:GetRole` |
+
+### Steps to Reproduce
+
+```bash
+# Run with admin/root credentials
+bash scripts/iam/setup_iam_user.sh
+
+# Verify the profile works
+aws sts get-caller-identity --profile cost-detective
+```
+
+Expected output:
+```json
+{
+    "UserId": "AIDAXXXXXXXXXXXXXXXXX",
+    "Account": "309797288544",
+    "Arn": "arn:aws:iam::309797288544:user/CostDetective"
+}
+```
+
+> **Screenshot placeholder — IAM user setup**
+> ![IAM user created](./screenshots/00_iam_user_created.png)
+> *AWS Console → IAM → Users → CostDetective showing the user and attached policies*
+
+---
+
+## Part 1 — Zombie Asset Detection & Cleanup
+
+### What are Zombie Assets?
+
+| Asset | Zombie Condition | Typical Monthly Cost |
+|---|---|---|
+| EBS Volume | `status = available` (not attached to any instance) | ~$0.08–$0.10/GB |
+| Elastic IP | Allocated but not associated with a running instance | ~$3.65/IP |
+| EC2 Instance | Running at 0–5% CPU for 14+ days (oversized/idle) | Varies by type |
+
+---
+
+### Step 1a — Simulate Zombie Resources
+
+The script creates three waste resources to audit against:
+
+1. **Unassociated Elastic IP** — allocated but never attached to an instance
+2. **Oversized idle EC2 instance** — `m5.xlarge` with no workload
+3. **Detached EBS volume** — root volume detached from a stopped `t2.micro` (DCE accounts block `ec2:CreateVolume` directly via SCP, so this workaround is used)
+
+**File:** `scripts/simulate_waste.sh`
+
+```bash
+bash scripts/simulate_waste.sh
+```
+
+Sample output:
+```
+=============================================
+ Cost Detective — Waste Simulation
+ Region : eu-central-1
+ Profile: cost-detective
+=============================================
+
+[1/4] Allocating unassociated Elastic IP...
+    ✓ Allocated EIP: 18.184.x.x (AllocationId: eipalloc-0abc123def)
+
+[2/4] Launching oversized idle EC2 instance (m5.xlarge)...
+    ✓ Launched instance: i-0d3910c054498f3ef (m5.xlarge — idle, no workload)
+
+[3/4] Launching t2.micro to generate a detachable EBS root volume...
+    ✓ Launched donor instance: i-06aeee54909de9a94
+    Waiting for instance to reach 'running' state...
+    ✓ Instance is running
+    Stopping instance...
+    ✓ Instance stopped
+    Detaching root volume vol-0xxxxxxxxxxxxxxxxx...
+    ✓ Volume detached: vol-0xxxxxxxxxxxxxxxxx (status: available — zombie EBS)
+
+[4/4] All waste resources created.
+
+=============================================
+ Zombie resources ready for the audit:
+   Elastic IP    : 18.184.x.x (eipalloc-0abc123def)
+   Idle Instance : i-0d3910c054498f3ef (m5.xlarge)
+   Zombie Volume : vol-0xxxxxxxxxxxxxxxxx (detached, available)
+   Donor Instance: i-06aeee54909de9a94 (stopped — can terminate)
+=============================================
+```
+
+> **Screenshot placeholder — Zombie resources in the console**
+> ![EC2 Instances](./screenshots/01a_ec2_instances_zombie.png)
+> *AWS Console → EC2 → Instances showing the idle m5.xlarge and stopped t2.micro*
+
+> ![EBS Volumes](./screenshots/01b_ebs_volume_available.png)
+> *AWS Console → EC2 → Volumes showing the detached volume in "available" state*
+
+> ![Elastic IPs](./screenshots/01c_elastic_ip_unassociated.png)
+> *AWS Console → EC2 → Elastic IPs showing the unassociated IP*
+
+---
+
+### Step 1b — Detect with AWS Trusted Advisor
+
+Navigate to: **AWS Console → Trusted Advisor → Cost Optimization**
+
+Key checks:
+- *Low Utilization Amazon EC2 Instances* — flags instances with <10% CPU over 14 days
+- *Unassociated Elastic IP Addresses* — lists all unattached EIPs
+- *Underutilized Amazon EBS Volumes* — flags volumes with <1 IOPS/day
+
+> **Note:** Full Trusted Advisor checks require Business or Enterprise Support. Free tier shows a subset.
+
+> **Screenshot placeholder — Trusted Advisor**
+> ![Trusted Advisor Cost Optimization](./screenshots/01d_trusted_advisor_cost.png)
+> *Trusted Advisor → Cost Optimization checks showing flagged resources*
+
+---
+
+### Step 1c — Detect with AWS Cost Explorer
+
+1. Go to **Cost Explorer → Rightsizing Recommendations**
+2. Filter by service: EC2
+3. Look for instances flagged as "Terminate" or "Downsize"
+
+> **Screenshot placeholder — Cost Explorer**
+> ![Cost Explorer Rightsizing](./screenshots/01e_cost_explorer_rightsizing.png)
+> *Cost Explorer → Rightsizing Recommendations showing the idle m5.xlarge*
+
+---
+
+### Step 1d — Run the EBS Garbage Collector
+
+**File:** `scripts/garbage_collect_ebs.py`
+
+The script uses a paginator to scan all EBS volumes with `status = available` across the region, prints a summary table, and optionally deletes them.
+
+```bash
+# Step 1: Dry-run — list all unattached volumes, delete nothing
+python3 scripts/garbage_collect_ebs.py
+
+# Step 2: Delete after confirming the list
+python3 scripts/garbage_collect_ebs.py --delete
+```
+
+Sample dry-run output:
+```
+Found 1 unattached volume(s) — 8 GB total
+
+VolumeId                  Size   Type       Age          Name
+---------------------------------------------------------------------------
+vol-0xxxxxxxxxxxxxxxxx    8GB    gp3        0d 1h        -
+
+[DRY-RUN] No volumes deleted. Re-run with --delete to remove them.
+```
+
+Sample delete output:
+```
+Deleting volumes...
+  ✓ Deleted vol-0xxxxxxxxxxxxxxxxx
+
+Done. Deleted: 1 | Failed: 0 | Freed: ~8 GB
+```
+
+> **Screenshot placeholder — EBS garbage collector**
+> ![EBS GC dry-run](./screenshots/01f_ebs_gc_dryrun.png)
+> *Terminal output of the dry-run listing the zombie volume*
+
+> ![EBS GC delete](./screenshots/01g_ebs_gc_delete.png)
+> *Terminal output confirming the volume was deleted*
+
+---
+
+### Step 1e — Run the EIP Garbage Collector
+
+**File:** `scripts/garbage_collect_eips.py`
+
+Finds all VPC Elastic IPs that have no `AssociationId` (not attached to any instance or ENI).
+
+```bash
+# Dry-run first
+python3 scripts/garbage_collect_eips.py
+
+# Release after confirming
+python3 scripts/garbage_collect_eips.py --release
+```
+
+Sample dry-run output:
+```
+Found 1 unassociated Elastic IP(s) — ~$3.65/month wasted
+
+AllocationId              PublicIp           Name
+-----------------------------------------------------------------
+eipalloc-0abc123def456    18.184.x.x         -
+
+[DRY-RUN] No EIPs released. Re-run with --release to remove them.
+```
+
+Sample release output:
+```
+Releasing EIPs...
+  ✓ Released eipalloc-0abc123def456 (18.184.x.x)
+
+Done. Released: 1 | Failed: 0 | Saved: ~$3.65/month
+```
+
+> **Screenshot placeholder — EIP garbage collector**
+> ![EIP GC](./screenshots/01h_eip_gc_release.png)
+> *Terminal output confirming the Elastic IP was released*
+
+---
+
+### Step 1f — Full Cleanup (Post-Demo Teardown)
+
+After screenshots are captured, tear everything down in one command:
+
+**File:** `scripts/cleanup_waste.sh`
+
+```bash
+export ALLOC_ID=eipalloc-0abc123def456
+export IDLE_INSTANCE_ID=i-0d3910c054498f3ef
+export EBS_INSTANCE_ID=i-06aeee54909de9a94
+export VOLUME_ID=vol-0xxxxxxxxxxxxxxxxx
+
+bash scripts/cleanup_waste.sh
+```
+
+Sample output:
+```
+=============================================
+ Cost Detective — Waste Cleanup
+ Region : eu-central-1
+ Profile: cost-detective
+=============================================
+
+[1/4] Releasing Elastic IP (eipalloc-0abc123def456)...
+    ✓ Elastic IP released
+
+[2/4] Deleting zombie EBS volume (vol-0xxxxxxxxxxxxxxxxx)...
+    ✓ EBS volume deleted
+
+[3/4] Terminating EC2 instances (i-0d3910c054498f3ef, i-06aeee54909de9a94)...
+    Waiting for both instances to reach 'terminated' state...
+    ✓ Both instances terminated
+
+[4/4] All zombie resources removed.
+
+=============================================
+ Cleanup complete — no billable waste remains
+=============================================
+```
+
+> **Screenshot placeholder — Post-cleanup verification**
+> ![Empty Volumes](./screenshots/01i_volumes_empty_after_cleanup.png)
+> *AWS Console → EC2 → Volumes showing no volumes in "available" state*
+
+---
+
+## Part 2 — Governance
+
+### Step 2a — AWS Budget with SNS Email Alerts
+
+**File:** `scripts/create_budget.py`
+
+Creates a monthly cost budget with two alert thresholds routed through an SNS topic to email:
+
+| Alert | Type | Threshold |
+|---|---|---|
+| Alert 1 | Forecasted | >100% of limit (e.g. forecast will exceed $50) |
+| Alert 2 | Actual | >80% of limit (e.g. actual spend has hit $40) |
+
+```bash
+python3 scripts/create_budget.py \
+  --account-id 309797288544 \
+  --email your-email@example.com \
+  --limit 50
+```
+
+Sample output:
+```
+SNS topic created: arn:aws:sns:eu-central-1:309797288544:CostDetective-Budget-Alerts
+  → Confirmation email sent to your-email@example.com — confirm the subscription before alerts fire.
+
+Budget 'CostDetective-Monthly-Budget' created:
+  Limit      : $50.0/month
+  Alert 1    : Forecasted spend > 100% of limit (>$50.0)
+  Alert 2    : Actual spend > 80% of limit (>$40)
+  Notify via : arn:aws:sns:eu-central-1:309797288544:CostDetective-Budget-Alerts
+```
+
+> **Important:** Check your inbox for the SNS confirmation email and click **Confirm subscription** — alerts will not be delivered until confirmed.
+
+> **Screenshot placeholder — AWS Budget created**
+> ![Budget in console](./screenshots/02a_budget_created.png)
+> *AWS Console → Billing → Budgets showing the CostDetective-Monthly-Budget*
+
+> ![SNS subscription confirmation email](./screenshots/02b_sns_confirmation_email.png)
+> *Email inbox showing the SNS subscription confirmation email*
+
+---
+
+### Step 2b — Tagging Policy
+
+A tagging policy ensures every resource is attributable to a team or project — the foundation of cost allocation.
+
+**Mandatory tag required:** `CostCenter`
+
+#### Option A — Service Control Policy (Preventive)
+
+**File:** `scripts/tagging_policy/scp_require_costcenter.json`
+
+Blocks `ec2:RunInstances` and `ec2:CreateVolume` if the `CostCenter` tag is missing. Applied at the AWS Organizations OU level.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "RequireCostCenterTagOnEC2",
+      "Effect": "Deny",
+      "Action": ["ec2:RunInstances"],
+      "Resource": "arn:aws:ec2:*:*:instance/*",
+      "Condition": {
+        "Null": { "aws:RequestTag/CostCenter": "true" }
+      }
+    },
+    {
+      "Sid": "RequireCostCenterTagOnEBSVolume",
+      "Effect": "Deny",
+      "Action": ["ec2:RunInstances", "ec2:CreateVolume"],
+      "Resource": "arn:aws:ec2:*:*:volume/*",
+      "Condition": {
+        "Null": { "aws:RequestTag/CostCenter": "true" }
+      }
+    }
+  ]
+}
+```
+
+```bash
+# Create the SCP (run as management account)
+aws organizations create-policy \
+  --name "RequireCostCenterTag" \
+  --type SERVICE_CONTROL_POLICY \
+  --description "Blocks EC2 launches without CostCenter tag" \
+  --content file://scripts/tagging_policy/scp_require_costcenter.json
+
+# Attach to your OU
+aws organizations attach-policy \
+  --policy-id p-xxxxxxxxxx \
+  --target-id ou-xxxx-xxxxxxxx
+```
+
+> **Note:** SCPs require AWS Organizations. The management account is exempt — test in a member account.
+
+#### Option B — AWS Config Rule (Detective)
+
+**File:** `scripts/tagging_policy/deploy_config_rule.py`
+
+Flags existing non-compliant resources without blocking them. The script handles the full AWS Config setup:
+
+1. Creates the S3 bucket for Config snapshots (`cost-detective-config-<account-id>`)
+2. Creates the `CostDetectiveConfigRole` IAM role for the Config service
+3. Creates a configuration recorder (scoped to `EC2::Instance` and `EC2::Volume` only)
+4. Creates the delivery channel pointing to the S3 bucket
+5. Starts the recorder
+6. Deploys the `REQUIRED_TAGS` managed rule
+
+```bash
+python3 scripts/tagging_policy/deploy_config_rule.py --profile cost-detective
+```
+
+Sample output:
+```
+[1/5] Setting up S3 delivery bucket...
+  ✓ S3 bucket created: cost-detective-config-309797288544
+  ✓ Bucket policy applied
+
+[2/5] Setting up Config IAM role...
+  ✓ IAM role created: CostDetectiveConfigRole
+  ⏳ Waiting 15s for IAM propagation...
+
+[3/5] Setting up configuration recorder...
+  ✓ Configuration recorder created
+
+[4/5] Setting up delivery channel...
+  ✓ Delivery channel created
+
+[5/5] Starting recorder and deploying rule...
+  ✓ Recorder started
+  ✓ Config rule 'require-costcenter-tag-on-ec2' deployed
+
+Done. Check AWS Config -> Rules in ~10 minutes for compliance results.
+```
+
+Verify via CLI immediately after:
+```bash
+aws configservice describe-config-rules \
+  --profile cost-detective \
+  --region eu-central-1
+
+aws configservice describe-configuration-recorder-status \
+  --profile cost-detective \
+  --region eu-central-1
+```
+
+> **Screenshot placeholder — AWS Config rule deployed**
+> ![Config Rules list](./screenshots/02c_config_rule_deployed.png)
+> *AWS Console → Config → Rules showing require-costcenter-tag-on-ec2*
+
+> ![Config compliance status](./screenshots/02d_config_compliance.png)
+> *Config rule detail showing compliance status — non-compliant resources listed under "Resources in scope"*
+
+---
+
+## Part 3 — Cost-Aware Auto Scaling Group
+
+### Concept: Mixed Instances Policy
+
+Instead of paying full On-Demand price for every instance, the ASG uses a Mixed Instances Policy:
+
+| Capacity tier | Purchase model |
+|---|---|
+| Base (always on) | On-Demand — guaranteed, never interrupted |
+| Scale-out (above base) | 25% On-Demand + **75% Spot** |
+
+Spot Instances are typically **60–90% cheaper** than On-Demand. With `price-capacity-optimized` strategy, AWS selects the Spot pool least likely to be interrupted.
+
+Five instance types are configured as overrides across two families (`t3`, `t3a`, `t2`) — if one Spot pool is unavailable, the ASG falls back to another.
+
+**File:** `infrastructure/asg_mixed_instances.yaml`
+
+### Prerequisites
+
+Get your VPC and subnet IDs:
+
+```bash
+# List VPCs
+aws ec2 describe-vpcs \
+  --profile cost-detective \
+  --region eu-central-1 \
+  --query "Vpcs[*].[VpcId,CidrBlock,Tags[?Key=='Name'].Value|[0]]" \
+  --output table
+
+# List subnets in your VPC
+aws ec2 describe-subnets \
+  --profile cost-detective \
+  --region eu-central-1 \
+  --filters "Name=vpc-id,Values=<your-vpc-id>" \
+  --query "Subnets[*].[SubnetId,AvailabilityZone,CidrBlock]" \
+  --output table
+```
+
+### Deploy the Stack
+
+```bash
+aws cloudformation deploy \
+  --template-file infrastructure/asg_mixed_instances.yaml \
+  --stack-name cost-detective-asg \
+  --capabilities CAPABILITY_IAM \
+  --region eu-central-1 \
+  --profile cost-detective \
+  --parameter-overrides \
+    VpcId=vpc-xxxxxxxxxxxxxxxxx \
+    SubnetIds="subnet-aaa111,subnet-bbb222" \
+    OnDemandBaseCapacity=1 \
+    MinSize=1 \
+    MaxSize=6 \
+    DesiredCapacity=2
+```
+
+> **Screenshot placeholder — CloudFormation stack deploy**
+> ![CloudFormation stack creating](./screenshots/03a_cfn_stack_creating.png)
+> *CloudFormation → Stacks → cost-detective-asg showing CREATE_IN_PROGRESS*
+
+> ![CloudFormation stack complete](./screenshots/03b_cfn_stack_complete.png)
+> *CloudFormation → Stacks → cost-detective-asg showing CREATE_COMPLETE with outputs*
+
+### Verify the On-Demand / Spot Mix
+
+```bash
+# Check lifecycle of each running instance
+aws autoscaling describe-auto-scaling-instances \
+  --profile cost-detective \
+  --region eu-central-1 \
+  --query "AutoScalingInstances[?AutoScalingGroupName=='cost-detective-asg'].[InstanceId,InstanceType,LifecycleState]" \
+  --output table
+
+# Check instance purchase type (on-demand vs spot)
+aws ec2 describe-instances \
+  --profile cost-detective \
+  --region eu-central-1 \
+  --filters "Name=tag:aws:autoscaling:groupName,Values=cost-detective-asg" \
+  --query "Reservations[*].Instances[*].[InstanceId,InstanceType,InstanceLifecycle,State.Name]" \
+  --output table
+```
+
+`InstanceLifecycle` will show `spot` for Spot Instances and is absent (defaults to `normal`) for On-Demand.
+
+The UserData script on each instance also serves its purchase type over HTTP:
+
+```bash
+# Replace with an actual instance public IP
+curl http://<instance-public-ip>
+# → <h1>Hello from i-0abc123 (spot)</h1>
+# → <h1>Hello from i-0def456 (on-demand)</h1>
+```
+
+> **Screenshot placeholder — ASG instances with Spot/On-Demand mix**
+> ![ASG instances table](./screenshots/03c_asg_instances_mix.png)
+> *Terminal output showing InstanceLifecycle: spot and normal side by side*
+
+> ![EC2 console ASG instances](./screenshots/03d_ec2_asg_instances_console.png)
+> *AWS Console → EC2 → Instances filtered by ASG, showing instance types and lifecycle*
+
+### Teardown
+
+```bash
+aws cloudformation delete-stack \
+  --stack-name cost-detective-asg \
+  --region eu-central-1 \
+  --profile cost-detective
+```
+
+> **Screenshot placeholder — Stack deleted**
+> ![Stack deleted](./screenshots/03e_cfn_stack_deleted.png)
+> *CloudFormation → Stacks showing cost-detective-asg in DELETE_COMPLETE or absent from the list*
+
+---
+
+## Estimated Savings Summary
+
+| Action | Monthly Saving |
+|---|---|
+| Delete 1 × 8 GB unattached EBS volume | ~$0.80 |
+| Release 1 unassociated Elastic IP | ~$3.65 |
+| Downsize 1 idle m5.xlarge → t3.small | ~$100+ |
+| 75% Spot on scale-out capacity (4 instances, t3.small) | ~$30–50 |
+| **Total (this demo scenario)** | **~$135–155/month** |
+
+Actual savings depend on region, instance hours, and workload profile.
+
+---
+
+## Key Commands Reference
+
+```bash
+# Verify CLI profile
+aws sts get-caller-identity --profile cost-detective
+
+# Simulate zombie resources
+bash scripts/simulate_waste.sh
+
+# Scan for zombie EBS volumes (dry-run)
+python3 scripts/garbage_collect_ebs.py
+
+# Delete zombie EBS volumes
+python3 scripts/garbage_collect_ebs.py --delete
+
+# Scan for unassociated Elastic IPs (dry-run)
+python3 scripts/garbage_collect_eips.py
+
+# Release unassociated Elastic IPs
+python3 scripts/garbage_collect_eips.py --release
+
+# Create budget + SNS alert
+python3 scripts/create_budget.py --account-id 309797288544 --email you@example.com --limit 50
+
+# Deploy AWS Config tagging rule
+python3 scripts/tagging_policy/deploy_config_rule.py --profile cost-detective
+
+# Verify Config rule deployed
+aws configservice describe-config-rules --profile cost-detective --region eu-central-1
+
+# Deploy cost-aware ASG
+aws cloudformation deploy \
+  --template-file infrastructure/asg_mixed_instances.yaml \
+  --stack-name cost-detective-asg \
+  --capabilities CAPABILITY_IAM \
+  --region eu-central-1 \
+  --profile cost-detective \
+  --parameter-overrides VpcId=vpc-xxx SubnetIds="subnet-aaa,subnet-bbb"
+
+# Check Spot vs On-Demand mix
+aws autoscaling describe-auto-scaling-instances \
+  --profile cost-detective --region eu-central-1 \
+  --query "AutoScalingInstances[?AutoScalingGroupName=='cost-detective-asg'].[InstanceId,InstanceType,LifecycleState]" \
+  --output table
+
+# Tear down the ASG stack
+aws cloudformation delete-stack --stack-name cost-detective-asg --region eu-central-1 --profile cost-detective
+
+# Tear down zombie resources (post-demo)
+export ALLOC_ID=eipalloc-xxx IDLE_INSTANCE_ID=i-xxx EBS_INSTANCE_ID=i-xxx VOLUME_ID=vol-xxx
+bash scripts/cleanup_waste.sh
+```
