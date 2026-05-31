@@ -4,22 +4,22 @@ Description: >
   Maintains a base of On-Demand instances and scales out with Spot Instances
   to minimize cost for stateless workloads.
 
+  This stack depends on the VPC stack (infrastructure/vpc.yaml).
+  Deploy vpc.yaml first, then this stack. The VpcId and SubnetIds are
+  pulled automatically from the VPC stack's Exports via Fn::ImportValue —
+  you do not need to pass them as parameters.
+
 # ── Parameters ────────────────────────────────────────────────────────────────
-# All deployment-specific values are externalised here so the template can be
-# reused across environments without editing the resource definitions below.
+# Only sizing values are parameters here. VPC/subnet IDs come from the VPC
+# stack's Exports so the two stacks stay in sync automatically.
 Parameters:
 
-  # The VPC where all resources (security group, ASG, instances) will be created
-  VpcId:
-    Type: AWS::EC2::VPC::Id
-    Description: VPC to deploy the ASG into
-
-  # Provide at least two subnets in different AZs.
-  # Multiple AZs are required for Spot diversification — if one AZ's Spot pool
-  # is interrupted or unavailable, the ASG can launch replacements in another AZ.
-  SubnetIds:
-    Type: List<AWS::EC2::Subnet::Id>
-    Description: At least two subnets in different AZs (required for Spot diversity)
+  # The EnvironmentName must match the one used when deploying vpc.yaml.
+  # It is used to look up the correct Fn::ImportValue exports from that stack.
+  EnvironmentName:
+    Type: String
+    Default: cost-detective
+    Description: Must match the EnvironmentName used in the vpc.yaml deploy
 
   # Resolved automatically from AWS SSM Parameter Store at deploy time.
   # Using the SSM alias means the stack always gets the latest Amazon Linux 2023 AMI
@@ -57,11 +57,20 @@ Resources:
   # Allows inbound HTTP (port 80) from anywhere so the demo web page served by
   # each instance's UserData script is reachable for verification.
   # In production, restrict CidrIp to your load balancer's security group instead.
+  #
+  # Fn::ImportValue reads an Export from another stack by name.
+  # The vpc.yaml stack exported the VPC ID as "${EnvironmentName}-VpcId".
+  # !Sub builds that export name using our EnvironmentName parameter, then
+  # Fn::ImportValue resolves it to the actual VpcId string at deploy time.
+  # This is how CloudFormation stacks share data without copy-pasting IDs.
   InstanceSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Allow HTTP inbound for demo workload
-      VpcId: !Ref VpcId
+      VpcId:
+        # Long-form Fn::ImportValue is required when nesting another function.
+        # !ImportValue shorthand only accepts a plain string, not a nested Fn::Sub.
+        "Fn::ImportValue": !Sub "${EnvironmentName}-VpcId"
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 80
@@ -163,7 +172,13 @@ Resources:
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
       AutoScalingGroupName: cost-detective-asg
-      VPCZoneIdentifier: !Ref SubnetIds   # Spread instances across all provided subnets/AZs
+      # Fn::Split turns the comma-separated subnet string from the VPC stack export
+      # into the list that VPCZoneIdentifier expects. This is the standard pattern
+      # for consuming a multi-value Export across stacks.
+      VPCZoneIdentifier:
+        "Fn::Split":
+          - ","
+          - "Fn::ImportValue": !Sub "${EnvironmentName}-SubnetIds"
       MinSize: !Ref MinSize
       MaxSize: !Ref MaxSize
       DesiredCapacity: !Ref DesiredCapacity

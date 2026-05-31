@@ -1,0 +1,186 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Cost Detective — VPC foundation stack.
+  Creates the network layer required by the ASG stack:
+  one VPC, two public subnets across two AZs, an Internet Gateway,
+  and a public route table.
+
+  In CloudFormation, infrastructure is split across multiple stacks
+  so each stack owns a single layer (network, compute, data, etc.).
+  Stacks share data through Outputs + Exports, which the consuming
+  stack reads with Fn::ImportValue. This template exports the VpcId
+  and both SubnetIds so the ASG stack can reference them by name
+  instead of hard-coding IDs.
+
+# ── Parameters ────────────────────────────────────────────────────────────────
+# Parameters are inputs you pass at deploy time.
+# They let you reuse the same template in different environments
+# (dev/staging/prod) without editing the resource definitions below.
+Parameters:
+
+  EnvironmentName:
+    Type: String
+    Default: cost-detective
+    Description: >
+      Short name used as a prefix for every resource Name tag and every
+      CloudFormation Export name. Change this to deploy a second copy of
+      the stack without naming conflicts.
+
+# ── Resources ─────────────────────────────────────────────────────────────────
+# The Resources section is the only required section in a CloudFormation template.
+# Each entry is a logical resource. CloudFormation figures out the dependency
+# order automatically using !Ref and !GetAtt references — you rarely need DependsOn.
+Resources:
+
+  # ── VPC ──────────────────────────────────────────────────────────────────────
+  # The Virtual Private Cloud is the top-level network boundary.
+  # All subnets, route tables, and gateways live inside it.
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16        # 65 536 private IPs — plenty for a demo
+      EnableDnsSupport: true         # Lets instances resolve AWS service DNS names
+      EnableDnsHostnames: true       # Gives instances a public DNS hostname
+      Tags:
+        - Key: Name
+          # !Sub replaces ${EnvironmentName} with the Parameter value at deploy time.
+          # It is the CloudFormation equivalent of a template string.
+          Value: !Sub "${EnvironmentName}-vpc"
+        - Key: CostCenter
+          Value: !Sub "${EnvironmentName}-demo"
+
+  # ── Internet Gateway ──────────────────────────────────────────────────────────
+  # An IGW is the door between the VPC and the public internet.
+  # Without one, instances in public subnets cannot send or receive traffic
+  # from outside the VPC (no outbound package downloads, no inbound HTTP).
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-igw"
+        - Key: CostCenter
+          Value: !Sub "${EnvironmentName}-demo"
+
+  # ── IGW Attachment ────────────────────────────────────────────────────────────
+  # An IGW must be explicitly attached to a VPC before it routes any traffic.
+  # !Ref on a resource returns its primary identifier — for a VPC that is the VpcId,
+  # for an IGW that is the InternetGatewayId.
+  # CloudFormation sees the !Ref VPC and !Ref InternetGateway references here and
+  # automatically creates the VPC and IGW before creating this attachment.
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # ── Public Subnet A — eu-central-1a ──────────────────────────────────────────
+  # A subnet is a range of IPs inside the VPC scoped to a single Availability Zone.
+  # "Public" means instances launched here get a public IP and traffic can flow
+  # to/from the internet via the route table + IGW we configure below.
+  # Two subnets in two AZs are required for Spot diversification: if one AZ's
+  # Spot pool is interrupted or prices spike, the ASG falls back to the other AZ.
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24         # 256 addresses — subnet of the VPC CIDR
+      AvailabilityZone: !Sub "${AWS::Region}a"   # AWS::Region is a pseudo-parameter
+      MapPublicIpOnLaunch: true       # Auto-assign a public IPv4 to every instance launched here
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-public-a"
+        - Key: CostCenter
+          Value: !Sub "${EnvironmentName}-demo"
+
+  # ── Public Subnet B — eu-central-1b ──────────────────────────────────────────
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Sub "${AWS::Region}b"
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-public-b"
+        - Key: CostCenter
+          Value: !Sub "${EnvironmentName}-demo"
+
+  # ── Public Route Table ────────────────────────────────────────────────────────
+  # A route table is a set of rules (routes) that control where network traffic
+  # is directed. Every VPC gets a default "main" route table, but best practice
+  # is to create explicit route tables so you control what is public vs private.
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-public-rtb"
+        - Key: CostCenter
+          Value: !Sub "${EnvironmentName}-demo"
+
+  # ── Default Route → Internet Gateway ─────────────────────────────────────────
+  # This single route makes the route table "public": any traffic destined for
+  # an address outside the VPC (0.0.0.0/0 = "everything else") is sent to the IGW.
+  # DependsOn is needed here because the route references the IGW but CloudFormation
+  # cannot infer the dependency from !Ref alone — the attachment must exist first
+  # or the route creation will fail with "invalid gateway".
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment   # IGW must be attached before we can route to it
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  # ── Route Table Associations ──────────────────────────────────────────────────
+  # Associating a subnet with a route table tells AWS which routes govern traffic
+  # from instances in that subnet. Without this, subnets use the VPC's main route
+  # table (which has no IGW route and is effectively private).
+  SubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  SubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+# ── Outputs ───────────────────────────────────────────────────────────────────
+# Outputs serve two purposes:
+#   1. They are printed in the CloudFormation console after a successful deploy —
+#      handy for copying IDs into the next deploy command.
+#   2. When an Output has an Export block, other stacks can read it with
+#      Fn::ImportValue without you having to copy/paste anything.
+#      The Export Name must be unique within a region and account.
+Outputs:
+
+  VpcId:
+    Description: ID of the VPC
+    Value: !Ref VPC
+    Export:
+      # Other stacks import this as: !ImportValue cost-detective-VpcId
+      Name: !Sub "${EnvironmentName}-VpcId"
+
+  PublicSubnetA:
+    Description: Subnet ID for eu-central-1a
+    Value: !Ref PublicSubnetA
+    Export:
+      Name: !Sub "${EnvironmentName}-SubnetA"
+
+  PublicSubnetB:
+    Description: Subnet ID for eu-central-1b
+    Value: !Ref PublicSubnetB
+    Export:
+      Name: !Sub "${EnvironmentName}-SubnetB"
+
+  SubnetIds:
+    Description: Comma-separated subnet IDs — paste directly into the ASG deploy command
+    Value: !Sub "${PublicSubnetA},${PublicSubnetB}"
+    Export:
+      Name: !Sub "${EnvironmentName}-SubnetIds"
