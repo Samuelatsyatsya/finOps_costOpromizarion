@@ -24,7 +24,8 @@
         "ec2:DetachVolume",
         "ec2:DescribeLaunchTemplates",
         "ec2:DescribeLaunchTemplateVersions",
-        "ec2:CreateLaunchTemplate"
+        "ec2:CreateLaunchTemplate",
+        "ec2:DeleteLaunchTemplate"
       ],
       "Resource": "*"
     },

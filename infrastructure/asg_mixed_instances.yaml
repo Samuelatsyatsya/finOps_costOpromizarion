@@ -96,9 +96,6 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore  # Enables SSM Session Manager
-      Tags:
-        - Key: CostCenter
-          Value: cost-detective-demo
 
   # ── Instance Profile ──────────────────────────────────────────────────────────
   # Wraps the IAM Role so it can be attached to EC2 instances.
