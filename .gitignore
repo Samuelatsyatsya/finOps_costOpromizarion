@@ -9,6 +9,9 @@ __pycache__/
 venv/
 env/
 
+# Virtual environment activation helpers
+.venv/
+
 # OS
 .DS_Store
 Thumbs.db
