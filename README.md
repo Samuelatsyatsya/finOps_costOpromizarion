@@ -95,7 +95,7 @@ Key checks to review:
 
 ```bash
 # Dry-run first — lists all unattached volumes, deletes nothing
-python scripts/garbage_collect_ebs.py
+python3 scripts/garbage_collect_ebs.py
 
 # Sample output:
 # Found 3 unattached volume(s) — 60 GB total
@@ -106,14 +106,14 @@ python scripts/garbage_collect_ebs.py
 # vol-0ghi789def012345c     20GB   gp3        1d 8h        -
 
 # Delete after confirming the list
-python scripts/garbage_collect_ebs.py --delete
+python3 scripts/garbage_collect_ebs.py --delete
 ```
 
 ### Step 1e — Clean Up Unassociated Elastic IPs
 
 ```bash
 # Dry-run first — lists all unassociated EIPs, releases nothing
-python scripts/garbage_collect_eips.py
+python3 scripts/garbage_collect_eips.py
 
 # Sample output:
 # Found 1 unassociated Elastic IP(s) — ~$3.65/month wasted
@@ -122,7 +122,7 @@ python scripts/garbage_collect_eips.py
 # eipalloc-0abc123def456    54.123.45.67       -
 
 # Release after confirming the list
-python scripts/garbage_collect_eips.py --release
+python3 scripts/garbage_collect_eips.py --release
 ```
 
 ### Step 1f — Cleanup After the Demo
@@ -146,7 +146,7 @@ The script releases the EIP, deletes the zombie volume, and terminates both inst
 ### Step 2a — Create a Budget with Alerts
 
 ```bash
-python scripts/create_budget.py \
+python3 scripts/create_budget.py \
   --account-id 123456789012 \
   --email your-team@example.com \
   --limit 50
@@ -203,7 +203,7 @@ aws organizations attach-policy \
 Flags existing non-compliant resources without blocking them. Good for brownfield environments.
 
 ```bash
-python scripts/tagging_policy/deploy_config_rule.py
+python3 scripts/tagging_policy/deploy_config_rule.py
 ```
 
 After ~10 minutes, check: **Console → AWS Config → Rules → require-costcenter-tag-on-ec2**
